@@ -19,7 +19,23 @@ fn main() {
 
         match tokens[0] {
             "exit" => return,
+            "echo" => echo(&tokens[1..]),
             command => println!("{command}: command not found"),
         }
     }
+}
+
+fn echo(stream: &[&str]) {
+    let mut msg = String::new();
+
+    for (i, s) in stream.iter().enumerate() {
+        msg.push_str(s);
+
+        // don't add white space after last element
+        if i < stream.len() - 1 {
+            msg.push(' ');
+        }
+    }
+
+    println!("{}", msg)
 }
