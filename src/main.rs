@@ -1,6 +1,8 @@
 #[allow(unused_imports)]
 use std::io::{self, Write};
 
+static COMMANDS: &'static [&str] = &["exit", "echo", "type"];
+
 fn main() {
     let stdin = io::stdin();
 
@@ -17,9 +19,12 @@ fn main() {
             continue;
         }
 
+        let stream = &tokens[1..];
+
         match tokens[0] {
             "exit" => return,
-            "echo" => echo(&tokens[1..]),
+            "echo" => echo(stream),
+            "type" => type_cmd(stream),
             command => println!("{command}: command not found"),
         }
     }
@@ -38,4 +43,15 @@ fn echo(stream: &[&str]) {
     }
 
     println!("{}", msg)
+}
+
+fn type_cmd(stream: &[&str]) {
+    if stream.len() != 1 {
+        return println!("type expects 1 argument");
+    }
+
+    match stream[0] {
+        x if COMMANDS.contains(&x) => println!("{x} is a shell builtin"),
+        any => println!("{any}: not found"),
+    }
 }
