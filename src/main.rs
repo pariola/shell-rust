@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
-use std::io::{self, Write};
+use std::io::{self, Error, Write};
+use std::{env, fs};
 
 static COMMANDS: &'static [&str] = &["exit", "echo", "type"];
 
@@ -50,8 +51,39 @@ fn type_cmd(stream: &[&str]) {
         return println!("type expects 1 argument");
     }
 
-    match stream[0] {
-        x if COMMANDS.contains(&x) => println!("{x} is a shell builtin"),
-        any => println!("{any}: not found"),
+    let command = stream[0];
+    if COMMANDS.contains(&command) {
+        return println!("{command} is a shell builtin");
     }
+
+    let path = env::var("PATH").unwrap();
+
+    let res = find_in_path(path.as_str(), command);
+    match res {
+        Result::Ok(None) => println!("{command}: not found"),
+        Result::Ok(Some(answer)) => println!("{command} is {answer}"),
+        Err(e) => println!("err: {}", e),
+    }
+}
+
+fn find_in_path(path: &str, file_name: &str) -> Result<Option<String>, io::Error> {
+    for dir in path.split(':') {
+        let entries_result = fs::read_dir(dir);
+        match entries_result {
+            core::result::Result::Err(e) => match e.kind() {
+                io::ErrorKind::NotFound => continue, // skip invalid dir
+                _ => return Err(e),
+            },
+            _ => (),
+        }
+
+        for entry in entries_result.unwrap() {
+            let entry = entry?;
+            if entry.file_name() == file_name {
+                return Ok(Some(format!("{}", entry.path().display())));
+            }
+        }
+    }
+
+    Ok(None)
 }
