@@ -3,6 +3,8 @@ use std::io::{self, Error, Write};
 use std::process::{Command, Stdio};
 use std::{env, fs};
 
+mod command;
+
 static COMMANDS: &'static [&str] = &["exit", "echo", "type"];
 
 fn main() {
@@ -15,18 +17,13 @@ fn main() {
         let mut input = String::new();
         stdin.read_line(&mut input).unwrap();
 
-        let tokens = Vec::from_iter(input.split_whitespace());
+        let cmd = command::parse(input);
 
-        if tokens.len() < 1 {
-            continue;
-        }
-
-        let stream = &tokens[1..];
-
-        match tokens[0] {
+        match cmd.program.as_str() {
+            "" => (),
             "exit" => return,
-            "echo" => echo(stream),
-            "type" => type_cmd(stream),
+            "echo" => echo(&cmd.arguments),
+            "type" => type_cmd(&cmd.arguments),
 
             command => {
                 let find_result = find_in_path(command);
@@ -45,7 +42,7 @@ fn main() {
                 };
 
                 let run_result = Command::new(location)
-                    .args(stream)
+                    .args(&cmd.arguments)
                     .stdin(Stdio::inherit()) // pipe stdin to parent's stdin
                     .stdout(Stdio::inherit()) // pipe stdout to parent's stdout
                     .stderr(Stdio::inherit()) // pipe stderr to parent's stderr
@@ -60,7 +57,7 @@ fn main() {
     }
 }
 
-fn echo(stream: &[&str]) {
+fn echo(stream: &[String]) {
     let mut msg = String::new();
 
     for (i, s) in stream.iter().enumerate() {
@@ -75,12 +72,12 @@ fn echo(stream: &[&str]) {
     println!("{}", msg)
 }
 
-fn type_cmd(stream: &[&str]) {
+fn type_cmd(stream: &[String]) {
     if stream.len() != 1 {
         return println!("type expects 1 argument");
     }
 
-    let command = stream[0];
+    let command = stream[0].as_str();
     if COMMANDS.contains(&command) {
         return println!("{command} is a shell builtin");
     }
