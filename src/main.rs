@@ -5,10 +5,15 @@ use std::{env, fs};
 
 mod command;
 
-static COMMANDS: &'static [&str] = &["exit", "echo", "type"];
+static COMMANDS: &'static [&str] = &["exit", "echo", "type", "pwd", "cd"];
 
 fn main() {
     let stdin = io::stdin();
+
+    let mut work_dir: String = match env::current_dir() {
+        Ok(v) => v.to_string_lossy().into_owned(),
+        Err(e) => panic!("err: fetch current dir: {e}"),
+    };
 
     loop {
         print!("$ ");
@@ -21,13 +26,14 @@ fn main() {
 
         match cmd.program.as_str() {
             "" => (),
+            "pwd" => println!("{work_dir}"),
+            "cd" => change_directory(&mut work_dir, &cmd.arguments),
             "exit" => return,
             "echo" => echo(&cmd.arguments),
             "type" => type_cmd(&cmd.arguments),
 
             command => {
-                let find_result = find_in_path(command);
-                let location = match find_result {
+                let location = match find_in_path(command) {
                     Result::Ok(Some(location)) => location,
 
                     Result::Ok(None) => {
@@ -57,14 +63,14 @@ fn main() {
     }
 }
 
-fn echo(stream: &[String]) {
+fn echo(args: &[String]) {
     let mut msg = String::new();
 
-    for (i, s) in stream.iter().enumerate() {
+    for (i, s) in args.iter().enumerate() {
         msg.push_str(s);
 
         // don't add white space after last element
-        if i < stream.len() - 1 {
+        if i < args.len() - 1 {
             msg.push(' ');
         }
     }
@@ -72,12 +78,12 @@ fn echo(stream: &[String]) {
     println!("{}", msg)
 }
 
-fn type_cmd(stream: &[String]) {
-    if stream.len() != 1 {
+fn type_cmd(args: &[String]) {
+    if args.len() != 1 {
         return println!("type expects 1 argument");
     }
 
-    let command = stream[0].as_str();
+    let command = args[0].as_str();
     if COMMANDS.contains(&command) {
         return println!("{command} is a shell builtin");
     }
@@ -113,10 +119,27 @@ fn find_in_path(file_name: &str) -> Result<Option<String>, io::Error> {
         for entry in entries_result.unwrap() {
             let entry = entry?;
             if entry.file_name() == file_name {
-                return Ok(Some(format!("{}", entry.path().display())));
+                return Ok(Some(entry.path().to_string_lossy().into_owned()));
             }
         }
     }
 
     Ok(None)
+}
+
+fn change_directory(work_dir: &mut String, args: &[String]) {
+    if args.len() != 1 {
+        return println!("cd expects 1 argument");
+    }
+
+    let path = &args[0];
+
+    match fs::read_dir(path) {
+        Ok(_) => *work_dir = path.clone(),
+
+        Err(e) => match e.kind() {
+            io::ErrorKind::NotFound => println!("cd: {}: No such file or directory", path),
+            _ => println!("cd err: {e}"),
+        },
+    }
 }
