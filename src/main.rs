@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 use std::io::{self, Error, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::{env, fs};
 
@@ -10,10 +11,7 @@ static COMMANDS: &'static [&str] = &["exit", "echo", "type", "pwd", "cd"];
 fn main() {
     let stdin = io::stdin();
 
-    let mut work_dir: String = match env::current_dir() {
-        Ok(v) => v.to_string_lossy().into_owned(),
-        Err(e) => panic!("err: fetch current dir: {e}"),
-    };
+    let mut work_dir = get_current_dir();
 
     loop {
         print!("$ ");
@@ -132,14 +130,37 @@ fn change_directory(work_dir: &mut String, args: &[String]) {
         return println!("cd expects 1 argument");
     }
 
-    let path = &args[0];
+    let mut path = args[0].clone();
+    if path.starts_with('~') {
+        let home_dir = get_home_dir();
+        path = path.replacen('~', &home_dir, 1);
+    }
 
-    match fs::read_dir(path) {
-        Ok(_) => *work_dir = path.clone(),
+    let full_path = Path::new(work_dir).join(path);
+
+    match fs::canonicalize(&full_path) {
+        Ok(v) => *work_dir = v.to_string_lossy().into_owned(),
 
         Err(e) => match e.kind() {
-            io::ErrorKind::NotFound => println!("cd: {}: No such file or directory", path),
-            _ => println!("cd err: {e}"),
+            io::ErrorKind::NotFound => println!(
+                "cd: {}: No such file or directory",
+                full_path.to_string_lossy()
+            ),
+            _ => panic!("cd err: {e}"),
         },
+    }
+}
+
+fn get_current_dir() -> String {
+    match env::current_dir() {
+        Ok(v) => v.to_string_lossy().into_owned(),
+        Err(e) => panic!("err: fetch current dir: {e}"),
+    }
+}
+
+fn get_home_dir() -> String {
+    match env::var("HOME") {
+        Ok(v) => v,
+        Err(e) => panic!("env err: HOME not set: {e}"),
     }
 }
