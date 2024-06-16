@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 use std::io::{self, Error, Write};
+use std::process::{Command, Stdio};
 use std::{env, fs};
 
 static COMMANDS: &'static [&str] = &["exit", "echo", "type"];
@@ -26,7 +27,35 @@ fn main() {
             "exit" => return,
             "echo" => echo(stream),
             "type" => type_cmd(stream),
-            command => println!("{command}: command not found"),
+
+            command => {
+                let find_result = find_in_path(command);
+                let location = match find_result {
+                    Result::Ok(Some(location)) => location,
+
+                    Result::Ok(None) => {
+                        println!("{command}: not found");
+                        continue;
+                    }
+
+                    Err(e) => {
+                        println!("err: {}", e);
+                        continue;
+                    }
+                };
+
+                let run_result = Command::new(location)
+                    .args(stream)
+                    .stdin(Stdio::inherit()) // pipe stdin to parent's stdin
+                    .stdout(Stdio::inherit()) // pipe stdout to parent's stdout
+                    .stderr(Stdio::inherit()) // pipe stderr to parent's stderr
+                    .output(); // executes the child process synchronously and captures its output.
+
+                match run_result {
+                    Ok(_) => (),
+                    Err(e) => println!("err: {}", e),
+                }
+            }
         }
     }
 }
@@ -56,9 +85,7 @@ fn type_cmd(stream: &[&str]) {
         return println!("{command} is a shell builtin");
     }
 
-    let path = env::var("PATH").unwrap();
-
-    let res = find_in_path(path.as_str(), command);
+    let res = find_in_path(command);
     match res {
         Result::Ok(None) => println!("{command}: not found"),
         Result::Ok(Some(answer)) => println!("{command} is {answer}"),
@@ -66,15 +93,24 @@ fn type_cmd(stream: &[&str]) {
     }
 }
 
-fn find_in_path(path: &str, file_name: &str) -> Result<Option<String>, io::Error> {
+fn find_in_path(file_name: &str) -> Result<Option<String>, io::Error> {
+    let path = match env::var("PATH") {
+        core::result::Result::Ok(v) => v,
+        core::result::Result::Err(_) => {
+            return Ok(None); // return early if PATH is not set
+        }
+    };
+
     for dir in path.split(':') {
         let entries_result = fs::read_dir(dir);
         match entries_result {
-            core::result::Result::Err(e) => match e.kind() {
-                io::ErrorKind::NotFound => continue, // skip invalid dir
-                _ => return Err(e),
-            },
-            _ => (),
+            core::result::Result::Err(e) => {
+                match e.kind() {
+                    io::ErrorKind::NotFound => continue, // skip invalid dir
+                    _ => return Err(e),
+                };
+            }
+            _ => (), // continue
         }
 
         for entry in entries_result.unwrap() {
