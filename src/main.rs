@@ -1,153 +1,86 @@
-#[allow(unused_imports)]
 use std::io::{self, Error, Write};
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::{env, fs};
+use std::{collections, env};
 
 mod command;
+mod shell;
 
-static COMMANDS: &'static [&str] = &["exit", "echo", "type", "pwd", "cd"];
+struct Shell {
+    state: shell::State,
+    commands: collections::HashMap<String, shell::Runner>,
+}
 
 fn main() {
-    let stdin = io::stdin();
+    let mut s = Shell {
+        state: shell::State {
+            home_dir: get_home_dir(),
+            work_dir: get_current_dir(),
+            builtin_commands: Vec::new(),
+        },
+        commands: collections::HashMap::new(),
+    };
 
-    let mut work_dir = get_current_dir();
+    s.register_command("pwd", shell::pwd);
+    s.register_command("echo", shell::echo);
+    s.register_command("exit", shell::exit);
+    s.register_command("type", shell::builtin_check);
+    s.register_command("cd", shell::change_directory);
 
-    loop {
-        print!("$ ");
-        io::stdout().flush().unwrap();
+    s.start()
+}
 
-        let mut input = String::new();
-        stdin.read_line(&mut input).unwrap();
+impl Shell {
+    fn register_command(&mut self, name: &str, runner: shell::Runner) {
+        let name = name.to_string();
+        self.commands.insert(name.clone(), runner);
+        self.state.builtin_commands.push(name.clone());
+    }
 
-        let cmd = command::parse(input);
+    fn run_command(
+        &mut self,
+        cmd: &command::Command,
+        input: Option<Vec<u8>>,
+    ) -> Result<shell::Output, Error> {
+        let program = cmd.program.clone();
 
-        match cmd.program.as_str() {
-            "" => (),
-            "pwd" => println!("{work_dir}"),
-            "cd" => change_directory(&mut work_dir, &cmd.arguments),
-            "exit" => return,
-            "echo" => echo(&cmd.arguments),
-            "type" => type_cmd(&cmd.arguments),
+        match self.commands.get(&cmd.program) {
+            None => shell::run_external(&mut self.state, program, &cmd.arguments, input),
+            Some(runner) => runner(&mut self.state, program, &cmd.arguments, input),
+        }
+    }
 
-            command => {
-                let location = match find_in_path(command) {
-                    Result::Ok(Some(location)) => location,
+    fn start(&mut self) {
+        let stdin = io::stdin();
 
-                    Result::Ok(None) => {
-                        println!("{command}: not found");
-                        continue;
+        loop {
+            print!("$ ");
+            io::stdout().flush().unwrap();
+
+            let mut input = String::new();
+            stdin.read_line(&mut input).unwrap();
+
+            let mut pipe: Option<Vec<u8>> = None;
+
+            for cmd in command::parse(input) {
+                match self.run_command(&cmd, pipe.clone()) {
+                    Err(_) => (),
+                    Ok(output) => {
+                        if output.exit {
+                            std::process::exit(output.code)
+                        }
+
+                        pipe = output.stdout.clone();
                     }
+                }
+            }
 
-                    Err(e) => {
-                        println!("err: {}", e);
-                        continue;
-                    }
-                };
-
-                let run_result = Command::new(location)
-                    .args(&cmd.arguments)
-                    .stdin(Stdio::inherit()) // pipe stdin to parent's stdin
-                    .stdout(Stdio::inherit()) // pipe stdout to parent's stdout
-                    .stderr(Stdio::inherit()) // pipe stderr to parent's stderr
-                    .output(); // executes the child process synchronously and captures its output.
-
-                match run_result {
-                    Ok(_) => (),
-                    Err(e) => println!("err: {}", e),
+            match pipe {
+                None => (),
+                Some(pipe_input) => {
+                    io::stdout().write_all(&pipe_input).unwrap();
+                    io::stdout().flush().unwrap();
                 }
             }
         }
-    }
-}
-
-fn echo(args: &[String]) {
-    let mut msg = String::new();
-
-    for (i, s) in args.iter().enumerate() {
-        msg.push_str(s);
-
-        // don't add white space after last element
-        if i < args.len() - 1 {
-            msg.push(' ');
-        }
-    }
-
-    println!("{}", msg)
-}
-
-fn type_cmd(args: &[String]) {
-    if args.len() != 1 {
-        return println!("type expects 1 argument");
-    }
-
-    let command = args[0].as_str();
-    if COMMANDS.contains(&command) {
-        return println!("{command} is a shell builtin");
-    }
-
-    let res = find_in_path(command);
-    match res {
-        Result::Ok(None) => println!("{command}: not found"),
-        Result::Ok(Some(answer)) => println!("{command} is {answer}"),
-        Err(e) => println!("err: {}", e),
-    }
-}
-
-fn find_in_path(file_name: &str) -> Result<Option<String>, io::Error> {
-    let path = match env::var("PATH") {
-        core::result::Result::Ok(v) => v,
-        core::result::Result::Err(_) => {
-            return Ok(None); // return early if PATH is not set
-        }
-    };
-
-    for dir in path.split(':') {
-        let entries_result = fs::read_dir(dir);
-        match entries_result {
-            core::result::Result::Err(e) => {
-                match e.kind() {
-                    io::ErrorKind::NotFound => continue, // skip invalid dir
-                    _ => return Err(e),
-                };
-            }
-            _ => (), // continue
-        }
-
-        for entry in entries_result.unwrap() {
-            let entry = entry?;
-            if entry.file_name() == file_name {
-                return Ok(Some(entry.path().to_string_lossy().into_owned()));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn change_directory(work_dir: &mut String, args: &[String]) {
-    if args.len() != 1 {
-        return println!("cd expects 1 argument");
-    }
-
-    let mut path = args[0].clone();
-    if path.starts_with('~') {
-        let home_dir = get_home_dir();
-        path = path.replacen('~', &home_dir, 1);
-    }
-
-    let full_path = Path::new(work_dir).join(path);
-
-    match fs::canonicalize(&full_path) {
-        Ok(v) => *work_dir = v.to_string_lossy().into_owned(),
-
-        Err(e) => match e.kind() {
-            io::ErrorKind::NotFound => println!(
-                "cd: {}: No such file or directory",
-                full_path.to_string_lossy()
-            ),
-            _ => panic!("cd err: {e}"),
-        },
     }
 }
 
