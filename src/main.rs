@@ -1,29 +1,31 @@
-use std::io::{self, Error, Write};
-use std::{collections, env};
-
 mod command;
+mod errors;
+mod prelude;
 mod shell;
+
+use prelude::*;
+use shell::{Input, Output};
+use std::collections;
+use std::io::{self, Write};
 
 struct Shell {
     state: shell::State,
-    commands: collections::HashMap<String, shell::Runner>,
+    runners: collections::HashMap<String, shell::Runner>,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let mut s = Shell {
         state: shell::State {
-            home_dir: get_home_dir(),
-            work_dir: get_current_dir(),
             builtin_commands: Vec::new(),
         },
-        commands: collections::HashMap::new(),
+        runners: collections::HashMap::new(),
     };
 
+    s.register_command("cd", shell::cd);
     s.register_command("pwd", shell::pwd);
     s.register_command("echo", shell::echo);
     s.register_command("exit", shell::exit);
-    s.register_command("type", shell::builtin_check);
-    s.register_command("cd", shell::change_directory);
+    s.register_command("type", shell::type_cmd);
 
     s.start()
 }
@@ -31,69 +33,49 @@ fn main() {
 impl Shell {
     fn register_command(&mut self, name: &str, runner: shell::Runner) {
         let name = name.to_string();
-        self.commands.insert(name.clone(), runner);
+        self.runners.insert(name.clone(), runner);
         self.state.builtin_commands.push(name.clone());
     }
 
     fn run_command(
         &mut self,
         cmd: &command::Command,
-        input: Option<Vec<u8>>,
-    ) -> Result<shell::Output, Error> {
-        let program = cmd.program.clone();
-
-        match self.commands.get(&cmd.program) {
-            None => shell::run_external(&mut self.state, program, &cmd.arguments, input),
-            Some(runner) => runner(&mut self.state, program, &cmd.arguments, input),
+        stdin: Option<Vec<u8>>,
+    ) -> Result<shell::Output> {
+        let input = Input::new(cmd, stdin);
+        match self.runners.get(&cmd.program) {
+            None => shell::external(&mut self.state, input),
+            Some(runner) => runner(&mut self.state, input),
         }
     }
 
-    fn start(&mut self) {
+    fn start(&mut self) -> Result<()> {
         let stdin = io::stdin();
 
         loop {
             print!("$ ");
             io::stdout().flush().unwrap();
 
-            let mut input = String::new();
-            stdin.read_line(&mut input).unwrap();
+            let mut raw_input = String::new();
+            stdin.read_line(&mut raw_input).unwrap();
 
-            let mut pipe: Option<Vec<u8>> = None;
+            let mut last_output = Output::default();
 
-            for cmd in command::parse(input) {
-                match self.run_command(&cmd, pipe.clone()) {
-                    Err(_) => (),
-                    Ok(output) => {
-                        if output.exit {
-                            std::process::exit(output.code)
-                        }
-
-                        pipe = output.stdout.clone();
-                    }
-                }
+            for cmd in command::parse(raw_input) {
+                last_output = self.run_command(&cmd, last_output.stdout.clone())?;
             }
 
-            match pipe {
+            match last_output.stdout {
                 None => (),
-                Some(pipe_input) => {
-                    io::stdout().write_all(&pipe_input).unwrap();
+                Some(out) => {
+                    io::stdout().write_all(&out).unwrap();
                     io::stdout().flush().unwrap();
                 }
             }
+
+            if last_output.exit {
+                std::process::exit(last_output.code)
+            }
         }
-    }
-}
-
-fn get_current_dir() -> String {
-    match env::current_dir() {
-        Ok(v) => v.to_string_lossy().into_owned(),
-        Err(e) => panic!("err: fetch current dir: {e}"),
-    }
-}
-
-fn get_home_dir() -> String {
-    match env::var("HOME") {
-        Ok(v) => v,
-        Err(e) => panic!("env err: HOME not set: {e}"),
     }
 }

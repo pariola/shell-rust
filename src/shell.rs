@@ -1,14 +1,30 @@
+use crate::{command, prelude::*};
 use std::{
     env,
-    io::{self, Error, Write},
-    path::Path,
-    process::{self, Command, Stdio},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 pub struct State {
-    pub home_dir: String,
-    pub work_dir: String,
     pub builtin_commands: Vec<String>,
+}
+
+#[derive(Default)]
+pub struct Input {
+    pub stdin: Option<Vec<u8>>,
+    pub program: String,
+    pub arguments: Vec<String>,
+}
+
+impl Input {
+    pub fn new(cmd: &command::Command, stdin: Option<Vec<u8>>) -> Self {
+        Self {
+            stdin: stdin,
+            program: cmd.program.clone(),
+            arguments: cmd.arguments.to_vec(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -51,20 +67,51 @@ impl Output {
     }
 }
 
-pub type RunResult = Result<Output, Error>;
+pub type Runner = fn(&mut State, Input) -> Result<Output>;
 
-pub type Runner = fn(&mut State, String, &[String], Option<Vec<u8>>) -> RunResult;
+pub fn cd(_: &mut State, input: Input) -> Result<Output> {
+    let args = input.arguments;
+    if args.len() != 1 {
+        return Ok(Output::with_string_output(1, "cd: too many arguments\n"));
+    }
 
-pub fn exit(_: &mut State, _: String, _: &[String], _: Option<Vec<u8>>) -> RunResult {
+    let full_path: PathBuf;
+
+    let mut path = args[0].clone();
+    if path.starts_with('~') {
+        let home_dir = env::var("HOME").unwrap_or_default();
+        path = path.replacen('~', &home_dir, 1);
+        full_path = PathBuf::from(path);
+    } else {
+        full_path = env::current_dir().map_err(Error::IO)?.join(path);
+    }
+
+    if let Err(e) = env::set_current_dir(&full_path) {
+        return match e.kind() {
+            io::ErrorKind::NotFound => {
+                let full_path_str = full_path.to_string_lossy();
+                let msg = format!("cd: {full_path_str}: No such file or directory\n");
+                Ok(Output::with_string_output(1, &msg))
+            }
+            _ => Err(Error::IO(e)),
+        };
+    }
+
+    Ok(Output::empty(0))
+}
+
+pub fn exit(_: &mut State, _: Input) -> Result<Output> {
     Ok(Output::exit(0))
 }
 
-pub fn pwd(state: &mut State, _: String, _: &[String], _: Option<Vec<u8>>) -> RunResult {
-    let msg = format!("{}\n", &state.work_dir);
+pub fn pwd(_: &mut State, _: Input) -> Result<Output> {
+    let dir = env::current_dir().map_err(Error::IO)?;
+    let msg = format!("{}\n", dir.to_string_lossy());
     Ok(Output::with_string_output(0, &msg))
 }
 
-pub fn echo(_: &mut State, _: String, args: &[String], _: Option<Vec<u8>>) -> RunResult {
+pub fn echo(_: &mut State, input: Input) -> Result<Output> {
+    let args = input.arguments;
     let mut msg = String::new();
 
     for (i, s) in args.iter().enumerate() {
@@ -81,47 +128,9 @@ pub fn echo(_: &mut State, _: String, args: &[String], _: Option<Vec<u8>>) -> Ru
     Ok(Output::with_string_output(0, &msg))
 }
 
-pub fn change_directory(
-    state: &mut State,
-    _: String,
-    args: &[String],
-    _: Option<Vec<u8>>,
-) -> RunResult {
-    if args.len() != 1 {
-        return Ok(Output::with_string_output(1, "cd: too many arguments\n"));
-    }
+pub fn type_cmd(state: &mut State, input: Input) -> Result<Output> {
+    let args = input.arguments;
 
-    let mut path = args[0].clone();
-    if path.starts_with('~') {
-        path = path.replacen('~', &state.home_dir, 1);
-    }
-
-    let full_path = Path::new(&state.work_dir).join(path);
-
-    match full_path.canonicalize() {
-        Ok(v) => {
-            state.work_dir = v.to_string_lossy().into_owned();
-            Ok(Output::empty(0))
-        }
-
-        Err(e) => match e.kind() {
-            io::ErrorKind::NotFound => {
-                let full_path_str = full_path.to_string_lossy();
-                let msg = format!("cd: {full_path_str}: No such file or directory\n");
-                Ok(Output::with_string_output(1, &msg))
-            }
-
-            _ => Err(e),
-        },
-    }
-}
-
-pub fn builtin_check(
-    state: &mut State,
-    _: String,
-    args: &[String],
-    _: Option<Vec<u8>>,
-) -> RunResult {
     if args.len() != 1 {
         return Ok(Output::with_string_output(1, "type expects 1 argument\n"));
     }
@@ -146,27 +155,10 @@ pub fn builtin_check(
     }
 }
 
-fn find_in_path(program: &str) -> Result<Option<String>, io::Error> {
-    let raw_path = env::var("PATH").unwrap_or_default();
+pub fn external(_: &mut State, input: Input) -> Result<Output> {
+    let program = &input.program;
 
-    for dir in raw_path.split(':') {
-        let p = Path::new(dir).join(&program);
-        if p.try_exists()? {
-            return Ok(Some(p.to_string_lossy().into_owned()));
-        }
-    }
-
-    Ok(None)
-}
-
-#[allow(unused_variables)]
-pub fn run_external(
-    state: &mut State,
-    program: String,
-    args: &[String],
-    input: Option<Vec<u8>>,
-) -> RunResult {
-    let location = match find_in_path(&program)? {
+    let location = match find_in_path(program)? {
         Some(location) => location,
         None => {
             let msg = format!("{program}: not found\n");
@@ -175,19 +167,38 @@ pub fn run_external(
     };
 
     let mut child = Command::new(location)
-        .args(args)
+        .args(&input.arguments)
         .stdin(Stdio::piped()) // pipe stdin
         .stdout(Stdio::piped()) // pipe stdout
         .stderr(Stdio::inherit()) // pipe stderr
-        .spawn()?; // executes child process synchronously
+        .spawn()
+        .map_err(Error::IO)?; // executes child process synchronously
 
     // write input to child process
-    if let Some(b) = input {
-        child.stdin.take().unwrap().write_all(&b)?;
+    if let Some(b) = input.stdin {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&b)
+            .map_err(Error::IO)?;
     }
 
-    let o: process::Output = child.wait_with_output()?;
+    let o = child.wait_with_output().map_err(Error::IO)?;
 
     let exit_code = o.status.code().unwrap();
     Ok(Output::with_output(exit_code, o.stdout))
+}
+
+fn find_in_path(program: &str) -> Result<Option<String>> {
+    let raw_path = env::var("PATH").unwrap_or_default();
+
+    for dir in raw_path.split(':') {
+        let p = Path::new(dir).join(&program);
+        if p.try_exists().map_err(Error::IO)? {
+            return Ok(Some(p.to_string_lossy().into_owned()));
+        }
+    }
+
+    Ok(None)
 }
