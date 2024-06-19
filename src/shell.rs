@@ -166,9 +166,14 @@ pub fn external(_: &mut State, input: Input) -> Result<Output> {
         }
     };
 
+    let stdin = match input.stdin {
+        None => Stdio::inherit(),
+        Some(_) => Stdio::piped(),
+    };
+
     let mut child = Command::new(location)
         .args(&input.arguments)
-        .stdin(Stdio::piped()) // pipe stdin
+        .stdin(stdin) // pipe stdin
         .stdout(Stdio::piped()) // pipe stdout
         .stderr(Stdio::inherit()) // pipe stderr
         .spawn()
